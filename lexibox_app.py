@@ -1,5 +1,5 @@
-# lexibox_app.py
 import streamlit as st
+import json
 import random
 from datetime import datetime
 import firebase_admin
@@ -7,32 +7,53 @@ from firebase_admin import credentials, firestore
 
 # ---------- Firebase Setup ----------
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_key.json")  # Replace with your Firebase key
+    firebase_key = st.secrets["FIREBASE"]
+    cred = credentials.Certificate(firebase_key)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
 # ---------- Constants ----------
-MAX_QUESTIONS = 10
+VOCAB_FILE = "words.json"
+BASE_POOL_SIZE = 20
 
-# ---------- Sample Vocabulary ----------
-vocab = {
-    "Aberration": "A departure from what is normal",
-    "Capitulate": "Cease to resist an opponent",
-    "Debacle": "A sudden failure",
-    "Enervate": "Cause someone to feel drained",
-    "Fervent": "Having passionate intensity",
-    "Garrulous": "Excessively talkative",
-    "Harangue": "A lengthy and aggressive speech",
-    "Impetuous": "Acting quickly without thought",
-    "Juxtapose": "Place side by side for contrast",
-    "Knavery": "Dishonest or unscrupulous behavior"
-}
+# ---------- Load Vocabulary ----------
+def load_vocab():
+    try:
+        with open(VOCAB_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-# ---------- Helper Functions ----------
+vocab = load_vocab()
+
+# ---------- Firestore Utilities ----------
+def get_user_ref(username):
+    return db.collection("users").document(username)
+
+def load_user(username):
+    doc = get_user_ref(username).get()
+    if doc.exists:
+        return doc.to_dict()
+    else:
+        data = {"username": username, "xp": 0, "history": [], "words": {}, "active_pool": []}
+        save_user(data)
+        return data
+
+def save_user(data):
+    get_user_ref(data["username"]).set(data)
+
+def delete_user(username):
+    get_user_ref(username).delete()
+
+# ---------- XP + Rank ----------
 def get_rank(xp):
     return xp // 200 + 1
 
+def get_pool_size(xp):
+    return BASE_POOL_SIZE + (get_rank(xp) - 1) * 5
+
+# ---------- Streak Bonus ----------
 def get_streak_bonus(streak):
     if streak == 3:
         return 5, "🔥 You're on fire!"
@@ -42,197 +63,165 @@ def get_streak_bonus(streak):
         return 15, "💀 God mode!"
     return 0, ""
 
-# ---------- Firebase Functions ----------
-def save_user(user_data):
-    db.collection("users").document(user_data["username"]).set(user_data)
+# ---------- Streamlit App ----------
+st.set_page_config(page_title="Lexibox", page_icon="🧠", layout="centered")
 
-def load_user(username):
-    doc_ref = db.collection("users").document(username)
-    doc = doc_ref.get()
-    if doc.exists:
-        return doc.to_dict()
-    else:
-        return {"username": username, "xp": 0, "history": [], "words": {}}
+if "page" not in st.session_state:
+    st.session_state.page = "profile"
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+if "quiz_state" not in st.session_state:
+    st.session_state.quiz_state = {}
 
-# ---------- Session State Initialization ----------
-state_vars = ["current_user", "quiz_words", "question_index", "streak",
-              "mode", "selected_option", "answer_submitted"]
-for var in state_vars:
-    if var not in st.session_state:
-        if var == "mode":
-            st.session_state[var] = "normal"
-        else:
-            st.session_state[var] = None
-
-# ---------- UI Functions ----------
+# ---------- Profile Screen ----------
 def show_profile_screen():
-    st.title("Lexibox - Select Profile")
+    st.title("Lexibox 🧠")
+    st.header("Select or Create Profile")
+
     usernames = [doc.id for doc in db.collection("users").stream()]
-    
-    selected = st.selectbox("Choose Profile", options=usernames if usernames else [""])
-    new_user_name = st.text_input("Or create new username")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Load Profile"):
-            if selected:
+    if usernames:
+        selected = st.selectbox("Choose a profile", usernames)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Continue ▶"):
                 st.session_state.current_user = load_user(selected)
-                st.session_state.mode = "normal"
-                reset_quiz_state()
-    with col2:
-        if new_user_name and st.button("Create New Profile"):
-            st.session_state.current_user = {
-                "username": new_user_name,
-                "xp": 0,
-                "history": [],
-                "words": {}
-            }
-            save_user(st.session_state.current_user)
-            st.session_state.mode = "normal"
-            reset_quiz_state()
+                st.session_state.page = "home"
+        with col2:
+            if st.button("❌ Delete"):
+                delete_user(selected)
+                st.success(f"Deleted profile: {selected}")
+                st.rerun()
+    st.divider()
+    new_name = st.text_input("Or create new profile:")
+    if st.button("Create Profile"):
+        if new_name.strip():
+            save_user({"username": new_name.strip(), "xp": 0, "history": [], "words": {}, "active_pool": []})
+            st.session_state.current_user = load_user(new_name.strip())
+            st.session_state.page = "home"
+            st.rerun()
 
-def reset_quiz_state():
-    st.session_state.quiz_words = []
-    st.session_state.question_index = 0
-    st.session_state.streak = 0
-    st.session_state.selected_option = None
-    st.session_state.answer_submitted = False
-    # Clear stored options
-    for key in list(st.session_state.keys()):
-        if key.startswith("options_"):
-            del st.session_state[key]
-
+# ---------- Home Screen ----------
 def show_home():
     user = st.session_state.current_user
+    xp = user["xp"]
+    rank = get_rank(xp)
     st.title(f"👤 {user['username']}")
-    st.write(f"XP: {user['xp']} | Rank: {get_rank(user['xp'])}")
-    st.progress(min((user["xp"] % 200)/200, 1))
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("▶ Start Quiz"):
-            start_quiz("normal")
-    with col2:
-        if st.button("📝 Practice Mode"):
-            start_quiz("practice")
-    with col3:
-        if st.button("📜 History"):
-            show_history()
-    
+    st.subheader(f"XP: {xp} | Rank: {rank}")
+    st.progress(min((xp % 200) / 200, 1))
+    st.divider()
+    if st.button("▶ Start Quiz"):
+        start_quiz("quiz")
+    if st.button("🧩 Practice Weak Words"):
+        start_quiz("practice")
+    if st.button("📜 View History"):
+        st.session_state.page = "history"
     if st.button("🔄 Switch Profile"):
-        st.session_state.current_user = None
-    if st.button("💾 Force Save User"):
-        save_user(user)
-        st.success(f"Saved {user['username']} to Firestore!")
+        st.session_state.page = "profile"
 
-def start_quiz(mode="normal"):
-    user = st.session_state.current_user
-    st.session_state.mode = mode
-    reset_quiz_state()
-    
-    all_words = list(vocab.keys())
-    if mode == "practice":
-        weak_words = [w for w, data in user.get("words", {}).items() if data.get("wrong_count", 0) >= 2]
-        st.session_state.quiz_words = weak_words if weak_words else random.sample(all_words, min(MAX_QUESTIONS, len(all_words)))
-    else:
-        st.session_state.quiz_words = random.sample(all_words, min(MAX_QUESTIONS, len(all_words)))
-
-def show_question():
-    user = st.session_state.current_user
-    idx = st.session_state.question_index
-    
-    if idx >= len(st.session_state.quiz_words):
-        st.success("🎉 Quiz Finished!")
-        save_user(user)
-    else:
-        word = st.session_state.quiz_words[idx]
-        correct = vocab[word]
-
-        # Persist options so they don’t reshuffle
-        if f"options_{idx}" not in st.session_state:
-            options = [correct] + random.sample([v for k,v in vocab.items() if v != correct], 3)
-            random.shuffle(options)
-            st.session_state[f"options_{idx}"] = options
-        else:
-            options = st.session_state[f"options_{idx}"]
-
-        st.header(f"Question {idx+1}: What is the meaning of '{word}'?")
-
-        # Answer selection
-        if not st.session_state.answer_submitted:
-            st.session_state.selected_option = st.radio("Select an option", options, key=f"radio_{idx}")
-            if st.button("Submit Answer", key=f"submit_{idx}"):
-                st.session_state.answer_submitted = True
-                is_correct = st.session_state.selected_option == correct
-                gained = 10 if is_correct else (-5 if st.session_state.mode=="normal" else 0)
-                if is_correct:
-                    st.session_state.streak +=1
-                else:
-                    st.session_state.streak = 0
-                bonus, msg = get_streak_bonus(st.session_state.streak)
-                gained += bonus
-                if st.session_state.mode=="normal":
-                    user["xp"] = max(0, user["xp"] + gained)
-                if word not in user["words"]:
-                    user["words"][word] = {"correct_count":0,"wrong_count":0}
-                if is_correct:
-                    user["words"][word]["correct_count"] +=1
-                else:
-                    user["words"][word]["wrong_count"] +=1
-                user["history"].append({
-                    "word": word,
-                    "selected": st.session_state.selected_option,
-                    "correct": correct,
-                    "result":"Correct" if is_correct else "Wrong",
-                    "xp_gained": gained,
-                    "mode": st.session_state.mode,
-                    "time": datetime.now().strftime("%H:%M:%S")
-                })
-                save_user(user)
-                if msg:
-                    st.info(msg)
-    
-        else:
-            # Feedback
-            for opt in options:
-                if opt == correct:
-                    st.success(f"{opt} ✅ Correct Answer")
-                elif opt == st.session_state.selected_option:
-                    st.error(f"{opt} ❌ Your Choice")
-                else:
-                    st.write(opt)
-            if st.button("Next Question", key=f"next_{idx}"):
-                st.session_state.question_index += 1
-                st.session_state.selected_option = None
-                st.session_state.answer_submitted = False
-
-    # ---------- Always Visible Buttons ----------
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Back to Home", key="quiz_home"):
-            reset_quiz_state()
-            return
-    with col2:
-        if st.button("❌ Delete Profile", key="delete_profile_quiz"):
-            db.collection("users").document(user["username"]).delete()
-            st.session_state.current_user = None
-            reset_quiz_state()
-            return
-
-def show_history():
-    user = st.session_state.current_user
-    st.title("📜 Quiz History")
-    history = user.get("history", [])[-30:]
-    for h in reversed(history):
-        status = "✅" if h["result"]=="Correct" else "❌"
-        st.write(f"{status} **{h['word']}** | You: {h['selected']} | Correct: {h['correct']} | XP: {h['xp_gained']} | Mode: {h['mode']} | {h['time']}")
-    if st.button("Back to Home"):
+# ---------- Quiz Logic ----------
+def start_quiz(mode):
+    vocab_keys = list(vocab.keys())
+    if not vocab_keys:
+        st.warning("No words available!")
         return
 
-# ---------- Main ----------
-if st.session_state.current_user is None:
+    user = st.session_state.current_user
+    xp = user["xp"]
+    pool_size = get_pool_size(xp)
+    active_pool = vocab_keys[:pool_size]
+
+    if mode == "practice":
+        weak_words = [h["word"] for h in user["history"] if h["result"] == "Wrong"]
+        quiz_words = list(set([w for w in weak_words if w in active_pool]))[:10]
+        if not quiz_words:
+            st.info("No weak words to practice right now. Do a normal quiz first.")
+            return
+    else:
+        quiz_words = random.sample(active_pool, min(10, len(active_pool)))
+
+    st.session_state.quiz_state = {
+        "mode": mode,
+        "words": quiz_words,
+        "index": 0,
+        "streak": 0,
+    }
+    st.session_state.page = "quiz"
+
+def show_quiz():
+    state = st.session_state.quiz_state
+    user = st.session_state.current_user
+    words = state["words"]
+    index = state["index"]
+
+    if index >= len(words):
+        st.success("🎉 Quiz Finished!")
+        if st.button("🏠 Back to Home"):
+            st.session_state.page = "home"
+        return
+
+    word = words[index]
+    correct = vocab[word]
+    options = [correct] + random.sample([v for v in vocab.values() if v != correct], 3)
+    random.shuffle(options)
+
+    st.header(f"Q{index+1}: What is the meaning of '{word}'?")
+    choice = st.radio("Choose one:", options, index=None)
+
+    if st.button("Submit Answer"):
+        correct_flag = (choice == correct)
+        xp_change = 10 if correct_flag else -5
+        if correct_flag:
+            state["streak"] += 1
+        else:
+            state["streak"] = 0
+        bonus, msg = get_streak_bonus(state["streak"])
+        xp_change += bonus
+
+        if state["mode"] == "quiz":
+            user["xp"] = max(0, user["xp"] + xp_change)
+        else:
+            xp_change = 0  # practice mode gives no XP
+
+        user["history"].append({
+            "word": word,
+            "selected": choice,
+            "correct": correct,
+            "result": "Correct" if correct_flag else "Wrong",
+            "xp_gained": xp_change,
+            "mode": state["mode"],
+            "time": datetime.now().strftime("%H:%M:%S")
+        })
+        save_user(user)
+
+        if msg:
+            st.info(msg)
+        st.write(f"✅ Correct answer: **{correct}**")
+        st.write(f"XP change: {xp_change}")
+        if st.button("Next Question ➡️"):
+            state["index"] += 1
+            st.rerun()
+        st.button("🏠 Back to Home", on_click=lambda: st.session_state.update(page="home"))
+        return
+
+    st.button("🏠 Back to Home", on_click=lambda: st.session_state.update(page="home"))
+
+# ---------- History Screen ----------
+def show_history():
+    st.title("📜 Quiz History")
+    user = st.session_state.current_user
+    history = user.get("history", [])[-30:]
+    for h in reversed(history):
+        status = "✅" if h["result"] == "Correct" else "❌"
+        st.write(f"{status} **{h['word']}** | You: {h['selected']} | Correct: {h['correct']} | XP: {h['xp_gained']} | Mode: {h['mode']} | {h['time']}")
+    if st.button("🏠 Back to Home"):
+        st.session_state.page = "home"
+
+# ---------- Navigation ----------
+if st.session_state.page == "profile":
     show_profile_screen()
-else:
+elif st.session_state.page == "home":
     show_home()
-    if st.session_state.quiz_words:
-        show_question()
+elif st.session_state.page == "quiz":
+    show_quiz()
+elif st.session_state.page == "history":
+    show_history()

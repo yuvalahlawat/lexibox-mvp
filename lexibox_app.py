@@ -1,158 +1,144 @@
 import streamlit as st
-import random
-import json
-import firebase_admin
-from firebase_admin import credentials, firestore
+import json, random, os
+from datetime import datetime
 
-# ---------- FIREBASE INIT ----------
-if not firebase_admin._apps:
-    cred = credentials.Certificate(dict(st.secrets["firebase"]))
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
+# ---------------- CONSTANTS ----------------
+VOCAB_FILE = "words.json"
+USER_FILE = "user_data.json"
 
-# ---------- LOAD WORDS ----------
-with open("words.json", "r") as f:
-    VOCAB = json.load(f)
+# ---------------- UTILITIES ----------------
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except:
+        return default
 
-# ---------- SESSION STATE ----------
-defaults = {
-    "page": "home",
-    "index": 0,
-    "score": 0,
-    "xp": 0,
-    "streak": 0,
-    "questions": [],
-    "answered": False,
-    "user": None
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
-# ---------- FIREBASE HELPERS ----------
-def load_user(uid):
-    doc = db.collection("users").document(uid).get()
-    if doc.exists:
-        return doc.to_dict()
+# ---------------- INITIALIZATION ----------------
+if "vocab" not in st.session_state:
+    st.session_state.vocab = load_json(VOCAB_FILE, {})
+
+if "user" not in st.session_state:
+    st.session_state.user = load_json(USER_FILE, {
+        "xp": 0,
+        "rank": "Beginner",
+        "streak": 0,
+        "history": [],
+        "cooldowns": {},
+    })
+
+vocab = st.session_state.vocab
+user = st.session_state.user
+
+# ---------------- HELPERS ----------------
+def get_rank(xp):
+    if xp < 100: return "Beginner"
+    elif xp < 250: return "Learner"
+    elif xp < 500: return "Adept"
+    elif xp < 1000: return "Pro"
+    else: return "Master"
+
+def get_question():
+    available = [w for w in vocab if w not in user["cooldowns"] or user["cooldowns"][w] <= 0]
+    if not available:
+        for w in user["cooldowns"]:
+            user["cooldowns"][w] = max(0, user["cooldowns"][w] - 1)
+        available = list(vocab.keys())
+    word = random.choice(available)
+    options = [vocab[word]["meaning"]]
+    while len(options) < 4:
+        choice = random.choice(list(vocab.values()))["meaning"]
+        if choice not in options:
+            options.append(choice)
+    random.shuffle(options)
+    return word, options
+
+def update_cooldowns(word, correct):
+    if correct:
+        user["cooldowns"][word] = 3
     else:
-        db.collection("users").document(uid).set({
-            "xp": 0,
-            "streak": 0,
-            "total_answered": 0
-        })
-        return {"xp": 0, "streak": 0, "total_answered": 0}
+        user["cooldowns"][word] = 0
 
-def save_user(uid, data):
-    db.collection("users").document(uid).set(data, merge=True)
-
-def delete_user(uid):
-    db.collection("users").document(uid).delete()
-    st.session_state.clear()
-    st.rerun()
-
-# ---------- XP & STREAK ----------
-def calculate_bonus(streak):
-    if streak >= 5:
-        return 15, "🔥 You're unstoppable!"
-    elif streak == 4:
-        return 10, "⚡ On a roll!"
-    elif streak == 3:
-        return 5, "🔥 You’re on fire!"
+def award_xp(correct):
+    if correct:
+        user["streak"] += 1
+        bonus = 0
+        if user["streak"] >= 5:
+            bonus = 15
+        elif user["streak"] == 4:
+            bonus = 10
+        elif user["streak"] == 3:
+            bonus = 5
+        xp = 10 + bonus
+        user["xp"] += xp
+        return f"+{xp} XP (Streak {user['streak']})"
     else:
-        return 0, ""
+        user["streak"] = 0
+        return "Wrong! Streak reset."
 
-# ---------- HOME PAGE ----------
+# ---------------- MAIN SCREENS ----------------
 def show_home():
-    st.title("🏠 Lexibox")
-    st.subheader("Expand your vocabulary. One word at a time.")
-    username = st.text_input("Enter your username to start:")
-    if st.button("Start Quiz ▶️"):
-        if username.strip() == "":
-            st.warning("Please enter a valid username.")
-        else:
-            st.session_state.user = username.strip()
-            user_data = load_user(username)
-            st.session_state.xp = user_data["xp"]
-            st.session_state.streak = user_data["streak"]
-            st.session_state.page = "quiz"
-            reset_quiz()
+    st.title("🧠 Lexibox")
+    st.subheader(f"Rank: {user['rank']}")
+    st.progress(min(user["xp"] % 1000 / 1000, 1.0))
+    st.write(f"XP: {user['xp']}")
+    st.write(f"Streak: {user['streak']} 🔥")
+
+    if st.button("Start Quiz"):
+        st.session_state.mode = "quiz"
+        st.session_state.quiz_state = {
+            "word": None,
+            "options": [],
+            "answered": False,
+            "feedback": "",
+        }
+
+def show_quiz():
+    state = st.session_state.quiz_state
+    if not state["word"]:
+        state["word"], state["options"] = get_question()
+
+    st.header(f"Word: {state['word']}")
+    for opt in state["options"]:
+        if st.button(opt, disabled=state["answered"]):
+            correct = opt == vocab[state["word"]]["meaning"]
+            feedback = award_xp(correct)
+            update_cooldowns(state["word"], correct)
+            user["rank"] = get_rank(user["xp"])
+            user["history"].append({
+                "word": state["word"],
+                "selected": opt,
+                "correct": vocab[state["word"]]["meaning"],
+                "result": "✅" if correct else "❌",
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+            save_json(USER_FILE, user)
+            state["answered"] = True
+            state["feedback"] = feedback
             st.rerun()
 
-    if st.session_state.user:
-        if st.button("🗑️ Delete Profile"):
-            delete_user(st.session_state.user)
+    if state["answered"]:
+        st.success(state["feedback"])
+        if st.button("Next"):
+            st.session_state.quiz_state = {"word": None, "options": [], "answered": False, "feedback": ""}
+            st.rerun()
 
-# ---------- RESET QUIZ ----------
-def reset_quiz():
-    st.session_state.index = 0
-    st.session_state.score = 0
-    st.session_state.questions = random.sample(list(VOCAB.items()), 5)
-    st.session_state.answered = False
+    if st.button("🏠 Back to Home"):
+        st.session_state.mode = "home"
+        save_json(USER_FILE, user)
+        st.rerun()
 
-# ---------- QUIZ PAGE ----------
-def show_quiz():
-    st.subheader("📘 Lexibox Quiz")
+# ---------------- MAIN APP ----------------
+if "mode" not in st.session_state:
+    st.session_state.mode = "home"
 
-    words_ref = db.collection("words").stream()
-    questions = []
-
-    # Load all words safely
-    for doc in words_ref:
-        data = doc.to_dict()
-        if "definition" not in data or "word" not in data:
-            continue  # skip invalid entries
-
-        # If options don't exist, auto-generate them
-        if "options" not in data or not isinstance(data["options"], list) or len(data["options"]) < 2:
-            # Grab random distractors from other words
-            all_words = [d.id for d in db.collection("words").list_documents() if d.id != doc.id]
-            random.shuffle(all_words)
-            distractors = all_words[:3]
-            options = [doc.id] + distractors
-            random.shuffle(options)
-        else:
-            options = data["options"]
-
-        questions.append({
-            "word": doc.id,
-            "definition": data["definition"],
-            "options": options,
-            "correct": data.get("correct", doc.id)
-        })
-
-    if not questions:
-        st.error("No valid quiz data found in Firestore.")
-        return
-
-    # Quiz state
-    if "q_index" not in st.session_state:
-        st.session_state.q_index = 0
-        st.session_state.score = 0
-
-    q_index = st.session_state.q_index
-    if q_index >= len(questions):
-        st.success(f"✅ Quiz complete! You scored {st.session_state.score}/{len(questions)}")
-        if st.button("Restart Quiz"):
-            st.session_state.q_index = 0
-            st.session_state.score = 0
-        return
-
-    q = questions[q_index]
-    st.write(f"**Definition:** {q['definition']}")
-
-    choice = st.radio("Choose the correct word:", q["options"], key=f"q{q_index}")
-
-    if st.button("Submit", key=f"submit{q_index}"):
-        if choice == q["correct"]:
-            st.success("✅ Correct!")
-            st.session_state.score += 1
-        else:
-            st.error(f"❌ Incorrect. The correct answer is: {q['correct']}")
-        st.session_state.q_index += 1
-        st.experimental_rerun()
-
-# ---------- ROUTER ----------
-if st.session_state.page == "home":
+if st.session_state.mode == "home":
     show_home()
-elif st.session_state.page == "quiz":
+elif st.session_state.mode == "quiz":
     show_quiz()

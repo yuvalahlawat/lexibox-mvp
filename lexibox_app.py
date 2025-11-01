@@ -91,56 +91,65 @@ def reset_quiz():
 
 # ---------- QUIZ PAGE ----------
 def show_quiz():
-    st.title("🧠 Lexibox Quiz")
+    st.subheader("📘 Lexibox Quiz")
 
-    st.write(f"**User:** {st.session_state.user}")
-    st.write(f"**XP:** {st.session_state.xp} | **Streak:** {st.session_state.streak}")
+    words_ref = db.collection("words").stream()
+    questions = []
 
-    if st.button("🏠 Back to Home"):
-        st.session_state.page = "home"
-        st.rerun()
+    # Load all words safely
+    for doc in words_ref:
+        data = doc.to_dict()
+        if "definition" not in data or "word" not in data:
+            continue  # skip invalid entries
 
-    if st.session_state.index < len(st.session_state.questions):
-        word, data = st.session_state.questions[st.session_state.index]
-        options = data["options"]
-        correct = data["answer"]
-
-        st.subheader(f"Word {st.session_state.index + 1}: {word}")
-
-        if not st.session_state.answered:
-            for opt in options:
-                if st.button(opt):
-                    st.session_state.answered = True
-                    st.session_state.index_answer = opt
-                    if opt == correct:
-                        st.session_state.score += 1
-                        st.session_state.streak += 1
-                        base_xp = 10
-                        bonus, msg = calculate_bonus(st.session_state.streak)
-                        gained = base_xp + bonus
-                        st.session_state.xp += gained
-                        st.success(f"✅ Correct! +{gained} XP {msg}")
-                    else:
-                        st.session_state.streak = 0
-                        st.error(f"❌ Wrong! Correct answer: {correct}")
-                    save_user(st.session_state.user, {
-                        "xp": st.session_state.xp,
-                        "streak": st.session_state.streak,
-                        "total_answered": firestore.Increment(1)
-                    })
-                    st.rerun()
+        # If options don't exist, auto-generate them
+        if "options" not in data or not isinstance(data["options"], list) or len(data["options"]) < 2:
+            # Grab random distractors from other words
+            all_words = [d.id for d in db.collection("words").list_documents() if d.id != doc.id]
+            random.shuffle(all_words)
+            distractors = all_words[:3]
+            options = [doc.id] + distractors
+            random.shuffle(options)
         else:
-            if st.button("Next ➡️"):
-                st.session_state.index += 1
-                st.session_state.answered = False
-                st.rerun()
+            options = data["options"]
 
-    else:
-        st.header("🎯 Quiz Complete!")
-        st.write(f"Your Score: {st.session_state.score}/{len(st.session_state.questions)}")
-        if st.button("Restart 🔁"):
-            reset_quiz()
-            st.rerun()
+        questions.append({
+            "word": doc.id,
+            "definition": data["definition"],
+            "options": options,
+            "correct": data.get("correct", doc.id)
+        })
+
+    if not questions:
+        st.error("No valid quiz data found in Firestore.")
+        return
+
+    # Quiz state
+    if "q_index" not in st.session_state:
+        st.session_state.q_index = 0
+        st.session_state.score = 0
+
+    q_index = st.session_state.q_index
+    if q_index >= len(questions):
+        st.success(f"✅ Quiz complete! You scored {st.session_state.score}/{len(questions)}")
+        if st.button("Restart Quiz"):
+            st.session_state.q_index = 0
+            st.session_state.score = 0
+        return
+
+    q = questions[q_index]
+    st.write(f"**Definition:** {q['definition']}")
+
+    choice = st.radio("Choose the correct word:", q["options"], key=f"q{q_index}")
+
+    if st.button("Submit", key=f"submit{q_index}"):
+        if choice == q["correct"]:
+            st.success("✅ Correct!")
+            st.session_state.score += 1
+        else:
+            st.error(f"❌ Incorrect. The correct answer is: {q['correct']}")
+        st.session_state.q_index += 1
+        st.experimental_rerun()
 
 # ---------- ROUTER ----------
 if st.session_state.page == "home":

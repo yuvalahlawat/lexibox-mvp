@@ -1,0 +1,41 @@
+{
+  "xp": 35,
+  "rank": "Beginner",
+  "streak": 0,
+  "history": [
+    {
+      "word": "exonerate",
+      "selected": "to clear from blame",
+      "correct": "to clear from blame",
+      "result": "\u2705",
+      "time": "10:32:29"
+    },
+    {
+      "word": "clandestine",
+      "selected": "kept secret or done secretly",
+      "correct": "kept secret or done secretly",
+      "result": "\u2705",
+      "time": "10:32:35"
+    },
+    {
+      "word": "disdain",
+      "selected": "the feeling that someone is unworthy",
+      "correct": "the feeling that someone is unworthy",
+      "result": "\u2705",
+      "time": "10:32:47"
+    },
+    {
+      "word": "duplicity",
+      "selected": "a harsh discordant mixture of sounds",
+      "correct": "deceitfulness",
+      "result": "\u274c",
+      "time": "10:32:51"
+    }
+  ],
+  "cooldowns": {
+    "exonerate": 3,
+    "clandestine": 3,
+    "disdain": 3,
+    "duplicity": 0
+  }
+}

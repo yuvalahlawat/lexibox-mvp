@@ -1,137 +1,149 @@
 import streamlit as st
 import random
+import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# ---------------- Firebase Setup ----------------
-firebase_key = dict(st.secrets["FIREBASE"])
-
+# ---------- FIREBASE INIT ----------
 if not firebase_admin._apps:
-    cred = credentials.Certificate(firebase_key)
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
-
 db = firestore.client()
 
-# ---------------- Utility Functions ----------------
-def get_user_data(username):
-    doc = db.collection("users").document(username).get()
+# ---------- LOAD WORDS ----------
+with open("words.json", "r") as f:
+    VOCAB = json.load(f)
+
+# ---------- SESSION STATE ----------
+defaults = {
+    "page": "home",
+    "index": 0,
+    "score": 0,
+    "xp": 0,
+    "streak": 0,
+    "questions": [],
+    "answered": False,
+    "user": None
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ---------- FIREBASE HELPERS ----------
+def load_user(uid):
+    doc = db.collection("users").document(uid).get()
     if doc.exists:
         return doc.to_dict()
     else:
-        data = {"xp": 0, "words_learned": [], "quiz_history": []}
-        db.collection("users").document(username).set(data)
-        return data
+        db.collection("users").document(uid).set({
+            "xp": 0,
+            "streak": 0,
+            "total_answered": 0
+        })
+        return {"xp": 0, "streak": 0, "total_answered": 0}
 
-def save_user_data(username, data):
-    db.collection("users").document(username).set(data)
+def save_user(uid, data):
+    db.collection("users").document(uid).set(data, merge=True)
 
-def delete_profile(username):
-    db.collection("users").document(username).delete()
+def delete_user(uid):
+    db.collection("users").document(uid).delete()
+    st.session_state.clear()
+    st.rerun()
 
-# ---------------- Word Bank (You can replace this) ----------------
-WORDS = {
-    "eloquent": "fluent or persuasive in speaking or writing",
-    "benevolent": "well meaning and kindly",
-    "candid": "truthful and straightforward",
-    "meticulous": "showing great attention to detail",
-    "vigilant": "keeping careful watch for danger or difficulties",
-    "lucid": "expressed clearly; easy to understand",
-    "transient": "lasting only for a short time",
-    "audacious": "showing a willingness to take bold risks",
-    "innate": "inborn; natural",
-    "arduous": "involving or requiring strenuous effort"
-}
+# ---------- XP & STREAK ----------
+def calculate_bonus(streak):
+    if streak >= 5:
+        return 15, "🔥 You're unstoppable!"
+    elif streak == 4:
+        return 10, "⚡ On a roll!"
+    elif streak == 3:
+        return 5, "🔥 You’re on fire!"
+    else:
+        return 0, ""
 
-# ---------------- Quiz Logic ----------------
-def quiz(username):
-    st.subheader(f"🔥 Lexibox Quiz for {username}")
-    user_data = get_user_data(username)
-    xp = user_data["xp"]
-
-    words = list(WORDS.items())
-    random.shuffle(words)
-    score = 0
-
-    for word, meaning in words:
-        st.write(f"### What is the meaning of **{word}**?")
-        options = [meaning] + random.sample([m for w, m in WORDS.items() if m != meaning], 3)
-        random.shuffle(options)
-
-        answer = st.radio("Choose an option:", options, key=word)
-        if st.button("Submit", key=f"submit_{word}"):
-            if answer == meaning:
-                st.success("✅ Correct!")
-                xp += 10
-                score += 1
-            else:
-                st.error(f"❌ Incorrect! The correct answer is: {meaning}")
-
-            user_data["xp"] = xp
-            user_data["quiz_history"].append({
-                "word": word,
-                "selected": answer,
-                "correct": meaning,
-                "result": answer == meaning
-            })
-            save_user_data(username, user_data)
-
-    st.write(f"### 🧠 Quiz Complete! Your score: {score}/{len(words)}")
-    st.write(f"### ⭐ Total XP: {xp}")
-
-    if st.button("💾 Force Save Progress"):
-        save_user_data(username, user_data)
-        st.success("Progress saved successfully!")
-
-    if st.button("🏠 Back to Home"):
-        st.session_state.page = "home"
-
-# ---------------- Profile Page ----------------
-def profile(username):
-    user_data = get_user_data(username)
-    st.title(f"👤 {username}'s Profile")
-    st.write(f"**XP:** {user_data['xp']}")
-    st.write(f"**Words Learned:** {len(user_data['words_learned'])}")
-    st.write(f"**Quiz Attempts:** {len(user_data['quiz_history'])}")
-
-    if st.button("🗑️ Delete Profile"):
-        delete_profile(username)
-        st.success("Profile deleted successfully!")
-        st.session_state.page = "login"
-
-    if st.button("🏠 Back to Home"):
-        st.session_state.page = "home"
-
-# ---------------- Home Page ----------------
-def home(username):
-    st.title("📚 Welcome to Lexibox!")
-    st.write(f"Hello, **{username}**! Ready to learn some new words?")
-
-    if st.button("🚀 Start Quiz"):
-        st.session_state.page = "quiz"
-
-    if st.button("👤 View Profile"):
-        st.session_state.page = "profile"
-
-# ---------------- Login Page ----------------
-def login():
-    st.title("🔐 Lexibox Login")
-    username = st.text_input("Enter your username:")
-    if st.button("Login"):
-        if username.strip():
-            st.session_state.username = username.strip()
-            st.session_state.page = "home"
-        else:
+# ---------- HOME PAGE ----------
+def show_home():
+    st.title("🏠 Lexibox")
+    st.subheader("Expand your vocabulary. One word at a time.")
+    username = st.text_input("Enter your username to start:")
+    if st.button("Start Quiz ▶️"):
+        if username.strip() == "":
             st.warning("Please enter a valid username.")
+        else:
+            st.session_state.user = username.strip()
+            user_data = load_user(username)
+            st.session_state.xp = user_data["xp"]
+            st.session_state.streak = user_data["streak"]
+            st.session_state.page = "quiz"
+            reset_quiz()
+            st.rerun()
 
-# ---------------- Page Controller ----------------
-if "page" not in st.session_state:
-    st.session_state.page = "login"
+    if st.session_state.user:
+        if st.button("🗑️ Delete Profile"):
+            delete_user(st.session_state.user)
 
-if st.session_state.page == "login":
-    login()
-elif st.session_state.page == "home":
-    home(st.session_state.username)
+# ---------- RESET QUIZ ----------
+def reset_quiz():
+    st.session_state.index = 0
+    st.session_state.score = 0
+    st.session_state.questions = random.sample(list(VOCAB.items()), 5)
+    st.session_state.answered = False
+
+# ---------- QUIZ PAGE ----------
+def show_quiz():
+    st.title("🧠 Lexibox Quiz")
+
+    st.write(f"**User:** {st.session_state.user}")
+    st.write(f"**XP:** {st.session_state.xp} | **Streak:** {st.session_state.streak}")
+
+    if st.button("🏠 Back to Home"):
+        st.session_state.page = "home"
+        st.rerun()
+
+    if st.session_state.index < len(st.session_state.questions):
+        word, data = st.session_state.questions[st.session_state.index]
+        options = data["options"]
+        correct = data["answer"]
+
+        st.subheader(f"Word {st.session_state.index + 1}: {word}")
+
+        if not st.session_state.answered:
+            for opt in options:
+                if st.button(opt):
+                    st.session_state.answered = True
+                    st.session_state.index_answer = opt
+                    if opt == correct:
+                        st.session_state.score += 1
+                        st.session_state.streak += 1
+                        base_xp = 10
+                        bonus, msg = calculate_bonus(st.session_state.streak)
+                        gained = base_xp + bonus
+                        st.session_state.xp += gained
+                        st.success(f"✅ Correct! +{gained} XP {msg}")
+                    else:
+                        st.session_state.streak = 0
+                        st.error(f"❌ Wrong! Correct answer: {correct}")
+                    save_user(st.session_state.user, {
+                        "xp": st.session_state.xp,
+                        "streak": st.session_state.streak,
+                        "total_answered": firestore.Increment(1)
+                    })
+                    st.rerun()
+        else:
+            if st.button("Next ➡️"):
+                st.session_state.index += 1
+                st.session_state.answered = False
+                st.rerun()
+
+    else:
+        st.header("🎯 Quiz Complete!")
+        st.write(f"Your Score: {st.session_state.score}/{len(st.session_state.questions)}")
+        if st.button("Restart 🔁"):
+            reset_quiz()
+            st.rerun()
+
+# ---------- ROUTER ----------
+if st.session_state.page == "home":
+    show_home()
 elif st.session_state.page == "quiz":
-    quiz(st.session_state.username)
-elif st.session_state.page == "profile":
-    profile(st.session_state.username)
+    show_quiz()
